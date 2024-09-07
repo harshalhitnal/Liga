@@ -1,159 +1,140 @@
-#include <ESP8266WiFi.h>
-#include <Servo.h>
-#include <Wire.h>
-#include <Adafruit_SSD1306.h>
-#include <ThingSpeak.h>
-#include <ESP8266HTTPClient.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "driver/ledc.h"
+#include "driver/gpio.h"
+#include "driver/i2c.h"
+#include "esp_wifi.h"
+#include "esp_http_client.h"
+#include "nvs_flash.h"
+#include "esp_log.h"
+#include <string.h>
 
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 64
-#define OLED_RESET    -1
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+#define SERVO_PIN GPIO_NUM_4
+#define TRIG_PIN GPIO_NUM_5
+#define ECHO_PIN GPIO_NUM_18
+#define BUZZER_PIN GPIO_NUM_19
 
-Servo damServo;
-WiFiClient client;
+#define I2C_MASTER_SCL_IO GPIO_NUM_22
+#define I2C_MASTER_SDA_IO GPIO_NUM_21
+#define I2C_MASTER_NUM I2C_NUM_1
 
-// Wi-Fi credentials
-const char* ssid = "your_SSID";
-const char* password = "your_PASSWORD";
+#define WIFI_SSID "your_SSID"
+#define WIFI_PASS "your_PASSWORD"
 
-// ThingSpeak API credentials
-unsigned long channelNumber = YOUR_CHANNEL_NUMBER;
-const char* apiKey = "YOUR_API_KEY";
+#define THINGSPEAK_API_KEY "your_ThingSpeak_API_key"
+#define THINGSPEAK_CHANNEL "your_channel_id"
 
-// Ultrasonic sensor pins
-#define TRIG_PIN D5
-#define ECHO_PIN D6
+// Ultrasonic sensor
+int get_water_level() {
+    gpio_set_level(TRIG_PIN, 0);
+    vTaskDelay(2 / portTICK_PERIOD_MS);
+    gpio_set_level(TRIG_PIN, 1);
+    vTaskDelay(10 / portTICK_PERIOD_MS);
+    gpio_set_level(TRIG_PIN, 0);
 
-// Buzzer pin
-#define BUZZER_PIN D3
+    // Measure pulse width
+    int64_t start_time = esp_timer_get_time();
+    while (gpio_get_level(ECHO_PIN) == 0) { }
+    int64_t echo_start = esp_timer_get_time();
 
-// Servo control pin
-#define SERVO_PIN D4
+    while (gpio_get_level(ECHO_PIN) == 1) { }
+    int64_t echo_end = esp_timer_get_time();
 
-// Timing variables
-unsigned long previousMillis = 0;
-const long interval = 60000; // 24-hour interval for email (set as 1 minute here for testing)
-
-// Variables to store water level and gate state
-int waterLevel = 0;
-bool gateOpen = false;
-int gateOpenCount = 0;
-unsigned long gateOpenTime;
-unsigned long gateCloseTime;
-
-void setup() {
-  Serial.begin(115200);
-  damServo.attach(SERVO_PIN);
-  pinMode(TRIG_PIN, OUTPUT);
-  pinMode(ECHO_PIN, INPUT);
-  pinMode(BUZZER_PIN, OUTPUT);
-  Wire.begin(D2, D1);  // I2C pins for OLED
-  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
-  
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(1000);
-    Serial.println("Connecting to WiFi...");
-  }
-  Serial.println("Connected to WiFi");
-  
-  ThingSpeak.begin(client);
-  display.clearDisplay();
-  display.display();
+    int64_t duration = echo_end - echo_start;
+    int distance = duration * 0.034 / 2;  // Convert time to distance (in cm)
+    return distance;
 }
 
-void loop() {
-  waterLevel = getWaterLevel();
-  displayWaterLevelAndStatus();
-  ThingSpeak.writeField(channelNumber, 1, waterLevel, apiKey);  // Send water level to ThingSpeak
-
-  if (waterLevel < 25 && !gateOpen) {
-    openGate();
-    ThingSpeak.writeField(channelNumber, 2, "Gate Opened", apiKey);  // Log gate open
-    sendNotification("Gate opened!");
-    gateOpenTime = millis();
-    gateOpenCount++;
-  } else if (waterLevel >= 25 && gateOpen) {
-    closeGate();
-    ThingSpeak.writeField(channelNumber, 2, "Gate Closed", apiKey);  // Log gate close
-    sendNotification("Gate closed!");
-    gateCloseTime = millis();
-  }
-
-  // Check if it's time to send the daily report
-  if (millis() - previousMillis >= interval) {
-    previousMillis = millis();
-    sendDailyEmailReport();
-  }
-
-  delay(2000);
+// Servo motor control using PWM
+void set_servo_angle(int angle) {
+    // Map angle (0-180) to duty cycle for servo (assuming 50Hz PWM)
+    int duty_cycle = (angle * (8192 / 180)) + 1000;
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty_cycle);
+    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
 }
 
-// Function to get water level using ultrasonic sensor
-int getWaterLevel() {
-  digitalWrite(TRIG_PIN, LOW);
-  delayMicroseconds(2);
-  digitalWrite(TRIG_PIN, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(TRIG_PIN, LOW);
-
-  long duration = pulseIn(ECHO_PIN, HIGH);
-  int distance = duration * 0.034 / 2;  // Distance in cm
-  return distance;
+// Function to control gate based on water level
+void control_gate(int water_level) {
+    if (water_level < 25) {
+        set_servo_angle(90);  // Open gate
+        gpio_set_level(BUZZER_PIN, 1);  // Turn on buzzer
+        vTaskDelay(2000 / portTICK_PERIOD_MS);  // 2 second delay
+        gpio_set_level(BUZZER_PIN, 0);  // Turn off buzzer
+    } else {
+        set_servo_angle(0);  // Close gate
+    }
 }
 
-// Function to display water level and gate status on OLED
-void displayWaterLevelAndStatus() {
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
-  display.print("Water Level: ");
-  display.print(waterLevel);
-  display.println(" cm");
+// Wi-Fi initialization
+void wifi_init() {
+    esp_netif_init();
+    esp_event_loop_create_default();
+    esp_netif_create_default_wifi_sta();
 
-  display.print("Gate Status: ");
-  if (gateOpen) {
-    display.println("OPEN");
-  } else {
-    display.println("CLOSED");
-  }
-  display.display();
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    esp_wifi_init(&cfg);
+
+    wifi_config_t wifi_config = {
+        .sta = {
+            .ssid = WIFI_SSID,
+            .password = WIFI_PASS,
+        },
+    };
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config);
+    esp_wifi_start();
+
+    esp_wifi_connect();
 }
 
-// Function to open the gate
-void openGate() {
-  damServo.write(90);  // Rotate servo to open position
-  gateOpen = true;
-  digitalWrite(BUZZER_PIN, HIGH);  // Turn on buzzer
-  delay(2000);  // Buzzer for 2 seconds
-  digitalWrite(BUZZER_PIN, LOW);
+// HTTP request to send data to ThingSpeak
+void send_data_to_thingspeak(int water_level) {
+    esp_http_client_config_t config = {
+        .url = "http://api.thingspeak.com/update",
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+
+    char post_data[100];
+    sprintf(post_data, "api_key=%s&field1=%d", THINGSPEAK_API_KEY, water_level);
+    esp_http_client_set_method(client, HTTP_METHOD_POST);
+    esp_http_client_set_post_field(client, post_data, strlen(post_data));
+
+    esp_http_client_perform(client);
+    esp_http_client_cleanup(client);
 }
 
-// Function to close the gate
-void closeGate() {
-  damServo.write(0);  // Rotate servo to close position
-  gateOpen = false;
+void app_main(void) {
+    nvs_flash_init();  // Initialize NVS
+    wifi_init();  // Initialize Wi-Fi
+    gpio_set_direction(TRIG_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_direction(ECHO_PIN, GPIO_MODE_INPUT);
+    gpio_set_direction(BUZZER_PIN, GPIO_MODE_OUTPUT);
+
+    // Configure LEDC (PWM) for servo control
+    ledc_timer_config_t ledc_timer = {
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .timer_num = LEDC_TIMER_0,
+        .duty_resolution = LEDC_TIMER_13_BIT,
+        .freq_hz = 50,  // 50Hz for servo
+        .clk_cfg = LEDC_AUTO_CLK
+    };
+    ledc_timer_config(&ledc_timer);
+
+    ledc_channel_config_t ledc_channel = {
+        .gpio_num = SERVO_PIN,
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .channel = LEDC_CHANNEL_0,
+        .timer_sel = LEDC_TIMER_0,
+        .duty = 0,  // Initially, duty cycle is 0
+        .hpoint = 0
+    };
+    ledc_channel_config(&ledc_channel);
+
+    while (1) {
+        int water_level = get_water_level();
+        control_gate(water_level);
+        send_data_to_thingspeak(water_level);
+        vTaskDelay(5000 / portTICK_PERIOD_MS);  // 5 seconds delay between each reading
+    }
 }
 
-// Function to send notification (Pushover or Telegram)
-void sendNotification(String message) {
-  HTTPClient http;
-  String url = "https://api.telegram.org/bot" + String("your_telegram_bot_token") + "/sendMessage?chat_id=" + String("your_chat_id") + "&text=" + message;
-  http.begin(url);
-  http.GET();
-  http.end();
-}
-
-// Function to send daily email report
-void sendDailyEmailReport() {
-  HTTPClient http;
-  String url = "https://maker.ifttt.com/trigger/dam_gate_report/with/key/" + String("your_IFTTT_key");
-  String jsonPayload = String("{\"value1\":\"") + gateOpenCount + "\",\"value2\":\"" + waterLevel + "\"}";
-
-  http.begin(url);
-  http.addHeader("Content-Type", "application/json");
-  http.POST(jsonPayload);
-  http.end();
-}
