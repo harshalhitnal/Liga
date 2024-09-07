@@ -1,0 +1,159 @@
+#include <ESP8266WiFi.h>
+#include <Servo.h>
+#include <Wire.h>
+#include <Adafruit_SSD1306.h>
+#include <ThingSpeak.h>
+#include <ESP8266HTTPClient.h>
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET    -1
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+Servo damServo;
+WiFiClient client;
+
+// Wi-Fi credentials
+const char* ssid = "your_SSID";
+const char* password = "your_PASSWORD";
+
+// ThingSpeak API credentials
+unsigned long channelNumber = YOUR_CHANNEL_NUMBER;
+const char* apiKey = "YOUR_API_KEY";
+
+// Ultrasonic sensor pins
+#define TRIG_PIN D5
+#define ECHO_PIN D6
+
+// Buzzer pin
+#define BUZZER_PIN D3
+
+// Servo control pin
+#define SERVO_PIN D4
+
+// Timing variables
+unsigned long previousMillis = 0;
+const long interval = 60000; // 24-hour interval for email (set as 1 minute here for testing)
+
+// Variables to store water level and gate state
+int waterLevel = 0;
+bool gateOpen = false;
+int gateOpenCount = 0;
+unsigned long gateOpenTime;
+unsigned long gateCloseTime;
+
+void setup() {
+  Serial.begin(115200);
+  damServo.attach(SERVO_PIN);
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  Wire.begin(D2, D1);  // I2C pins for OLED
+  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.println("Connecting to WiFi...");
+  }
+  Serial.println("Connected to WiFi");
+  
+  ThingSpeak.begin(client);
+  display.clearDisplay();
+  display.display();
+}
+
+void loop() {
+  waterLevel = getWaterLevel();
+  displayWaterLevelAndStatus();
+  ThingSpeak.writeField(channelNumber, 1, waterLevel, apiKey);  // Send water level to ThingSpeak
+
+  if (waterLevel < 25 && !gateOpen) {
+    openGate();
+    ThingSpeak.writeField(channelNumber, 2, "Gate Opened", apiKey);  // Log gate open
+    sendNotification("Gate opened!");
+    gateOpenTime = millis();
+    gateOpenCount++;
+  } else if (waterLevel >= 25 && gateOpen) {
+    closeGate();
+    ThingSpeak.writeField(channelNumber, 2, "Gate Closed", apiKey);  // Log gate close
+    sendNotification("Gate closed!");
+    gateCloseTime = millis();
+  }
+
+  // Check if it's time to send the daily report
+  if (millis() - previousMillis >= interval) {
+    previousMillis = millis();
+    sendDailyEmailReport();
+  }
+
+  delay(2000);
+}
+
+// Function to get water level using ultrasonic sensor
+int getWaterLevel() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+
+  long duration = pulseIn(ECHO_PIN, HIGH);
+  int distance = duration * 0.034 / 2;  // Distance in cm
+  return distance;
+}
+
+// Function to display water level and gate status on OLED
+void displayWaterLevelAndStatus() {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.print("Water Level: ");
+  display.print(waterLevel);
+  display.println(" cm");
+
+  display.print("Gate Status: ");
+  if (gateOpen) {
+    display.println("OPEN");
+  } else {
+    display.println("CLOSED");
+  }
+  display.display();
+}
+
+// Function to open the gate
+void openGate() {
+  damServo.write(90);  // Rotate servo to open position
+  gateOpen = true;
+  digitalWrite(BUZZER_PIN, HIGH);  // Turn on buzzer
+  delay(2000);  // Buzzer for 2 seconds
+  digitalWrite(BUZZER_PIN, LOW);
+}
+
+// Function to close the gate
+void closeGate() {
+  damServo.write(0);  // Rotate servo to close position
+  gateOpen = false;
+}
+
+// Function to send notification (Pushover or Telegram)
+void sendNotification(String message) {
+  HTTPClient http;
+  String url = "https://api.telegram.org/bot" + String("your_telegram_bot_token") + "/sendMessage?chat_id=" + String("your_chat_id") + "&text=" + message;
+  http.begin(url);
+  http.GET();
+  http.end();
+}
+
+// Function to send daily email report
+void sendDailyEmailReport() {
+  HTTPClient http;
+  String url = "https://maker.ifttt.com/trigger/dam_gate_report/with/key/" + String("your_IFTTT_key");
+  String jsonPayload = String("{\"value1\":\"") + gateOpenCount + "\",\"value2\":\"" + waterLevel + "\"}";
+
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  http.POST(jsonPayload);
+  http.end();
+}
