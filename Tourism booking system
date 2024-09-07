@@ -1,0 +1,109 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+// Define the number of seats per destination
+#define SEATS 40
+
+// Function declarations
+int sendOTP();
+void bookTourismPackage();
+
+// Available seats for each destination (initially all seats are available)
+int availableSeats[] = {SEATS, SEATS, SEATS, SEATS, SEATS}; 
+
+// Prices for destinations
+int ticketPrices[] = {2000, 1500, 1800, 2200, 1200};
+
+// Destination names
+const char *destinations[] = {
+    "Manali",
+    "Shimla",
+    "Dharamshala",
+    "Sonmarg",
+    "Haridwar"
+};
+
+// Function to simulate sending OTP (always returns success in this mock)
+int sendOTP() {
+    int otp = rand() % 9000 + 1000;  // Generate a 4-digit OTP
+    printf("Sending OTP: %d\n", otp);
+    int enteredOTP;
+    printf("Enter the OTP sent to your mobile: ");
+    scanf("%d", &enteredOTP);
+    if (enteredOTP == otp) {
+        printf("OTP verified successfully!\n");
+        return 1;
+    } else {
+        printf("Invalid OTP. Booking failed.\n");
+        return 0;
+    }
+}
+
+// Function to book the tourism package
+void bookTourismPackage() {
+    char name[50], mobile[15], travelDate[11];
+    int choice, seatChoice;
+    
+    // Get user details
+    printf("Enter your name: ");
+    scanf(" %[^\n]%*c", name);  // Reads the full name including spaces
+    printf("Enter your mobile number: ");
+    scanf(" %[^\n]%*c", mobile);  // Reads the mobile number
+
+    // Send OTP and verify
+    if (!sendOTP()) {
+        return;  // Exit if OTP verification fails
+    }
+
+    // Display available destinations
+    printf("\nAvailable Destinations:\n");
+    for (int i = 0; i < 5; i++) {
+        printf("%d. %s - Rs %d\n", i + 1, destinations[i], ticketPrices[i]);
+    }
+
+    // Get destination choice
+    printf("Enter the number corresponding to your destination: ");
+    scanf("%d", &choice);
+    if (choice < 1 || choice > 5) {
+        printf("Invalid choice! Please restart the booking process.\n");
+        return;
+    }
+
+    choice--;  // Adjust choice for 0-based index
+
+    // Check available seats
+    if (availableSeats[choice] == 0) {
+        printf("No seats available for %s. Please try another destination.\n", destinations[choice]);
+        return;
+    }
+
+    // Get seat number
+    printf("Enter the seat number (1-%d): ", SEATS);
+    scanf("%d", &seatChoice);
+    if (seatChoice < 1 || seatChoice > SEATS || seatChoice > SEATS - availableSeats[choice]) {
+        printf("Invalid seat number or already booked. Please restart the booking process.\n");
+        return;
+    }
+
+    // Reduce seat availability
+    availableSeats[choice]--;
+
+    // Get travel date
+    printf("Enter your travel date (DD-MM-YYYY): ");
+    scanf(" %[^\n]%*c", travelDate);
+
+    // Display booking confirmation and bill
+    printf("\nBooking confirmed!\n");
+    printf("Name: %s\n", name);
+    printf("Mobile Number: %s\n", mobile);
+    printf("Destination: %s\n", destinations[choice]);
+    printf("Travel Date: %s\n", travelDate);
+    printf("Seat Number: %d\n", seatChoice);
+    printf("Total Amount: Rs %d\n", ticketPrices[choice]);
+}
+
+int main() {
+    bookTourismPackage();
+    return 0;
+}
